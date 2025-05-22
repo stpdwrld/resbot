@@ -1,0 +1,31 @@
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "api/bot.js",
+      "use": "@vercel/node"
+    },
+    {
+      "src": "api/check-proxy.js",
+      "use": "@vercel/node"
+    },
+    {
+      "src": "public/**",
+      "use": "@vercel/static"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/api/bot",
+      "dest": "/api/bot.js"
+    },
+    {
+      "src": "/api/v1",
+      "dest": "/api/check-proxy.js"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "public/index.html"
+    }
+  ]
+}
