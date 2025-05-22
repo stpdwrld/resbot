@@ -94,6 +94,7 @@ async function checkProxies(ctx, proxies) {
   const dead = [];
   const total = proxies.length;
   let lastUpdate = 0;
+  let processedCount = 0;
 
   for (let i = 0; i < proxies.length; i += 10) {
     const batch = proxies.slice(i, i + 10);
@@ -118,15 +119,21 @@ async function checkProxies(ctx, proxies) {
       }
     }));
 
+    processedCount += batch.length;
+    
     // Send progress update
-    const progress = Math.floor(((i + 10) / total) * 100);
+    const progress = Math.floor((processedCount / total) * 100);
     const now = Date.now();
     if (progress >= lastUpdate + 25 || now - lastUpdate > 60000) {
-      await ctx.reply(`⏳ Progress: ${progress}% (${i + 10}/${total} proxies checked)`);
+      await ctx.reply(`⏳ Progress: ${progress}% (${processedCount}/${total} proxies checked)`);
       lastUpdate = progress;
     }
     
-    if (i + 10 < proxies.length) {
+    // Add 10-second delay after every 180 proxies
+    if (processedCount % 180 === 0 && processedCount < total) {
+      await ctx.reply(`⏸ Pausing for 10 seconds after checking ${processedCount} proxies...`);
+      await new Promise(resolve => setTimeout(resolve, 10000));
+    } else if (i + 10 < proxies.length) {
       await new Promise(resolve => setTimeout(resolve, 500));
     }
   }
