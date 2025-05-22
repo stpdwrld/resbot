@@ -5,6 +5,7 @@ const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
 const API_URL = process.env.PROXY_CHECK_API || 'https://cekstupid.vercel.app/api/v1';
 
 const processingStatus = {};
+const progressMessages = {}; // To track progress messages per chat
 
 bot.start((ctx) => {
   ctx.reply('🤖 Welcome to Proxy Scanner Bot!\n\nSend me a text file containing proxies (max 500) in format:\n- proxy:port\n- proxy,port,countrycode,isp\n\nI will check them and send back active and dead lists.');
@@ -40,8 +41,19 @@ bot.on('document', async (ctx) => {
       return ctx.reply(`Too many proxies (${proxies.length}). Maximum allowed is 500.`);
     }
     
-    await ctx.reply(`🔍 Found ${proxies.length} proxies. Checking them now...`);
-    const results = await checkProxies(ctx, proxies);
+    // Send initial message and store its message_id
+    const initialMessage = await ctx.reply(`🔍 Found ${proxies.length} proxies. Checking them now...\n⏳ Progress: 0% (0/${proxies.length} proxies checked)`);
+    progressMessages[chatId] = initialMessage.message_id;
+    
+    const results = await checkProxies(ctx, chatId, proxies);
+    
+    // Delete the progress message
+    try {
+      await ctx.telegram.deleteMessage(chatId, progressMessages[chatId]);
+      delete progressMessages[chatId];
+    } catch (e) {
+      console.error('Error deleting progress message:', e);
+    }
     
     // Send results
     await sendResults(ctx, results);
@@ -50,6 +62,16 @@ bot.on('document', async (ctx) => {
   } catch (error) {
     console.error('Error:', error);
     ctx.reply('❌ An error occurred while processing your file.');
+    
+    // Try to delete progress message if it exists
+    if (progressMessages[chatId]) {
+      try {
+        await ctx.telegram.deleteMessage(chatId, progressMessages[chatId]);
+        delete progressMessages[chatId];
+      } catch (e) {
+        console.error('Error deleting progress message:', e);
+      }
+    }
   } finally {
     processingStatus[chatId] = false;
   }
@@ -75,7 +97,7 @@ function parseProxies(content) {
     .filter(Boolean);
 }
 
-async function checkProxies(ctx, proxies) {
+async function checkProxies(ctx, chatId, proxies) {
   const active = [];
   const dead = [];
   const total = proxies.length;
@@ -112,18 +134,36 @@ async function checkProxies(ctx, proxies) {
 
     processedCount += batch.length;
     
-    // Send progress update
+    // Update progress message
     const progress = Math.floor((processedCount / total) * 100);
     const now = Date.now();
-    if (progress >= lastUpdate + 25 || now - lastUpdate > 60000) {
-      await ctx.reply(`⏳ Progress: ${progress}% (${processedCount}/${total} proxies checked)`);
-      lastUpdate = progress;
+    if (progress >= lastUpdate + 5 || now - lastUpdate > 30000) { // Update every 5% or 30 seconds
+      try {
+        await ctx.telegram.editMessageText(
+          chatId,
+          progressMessages[chatId],
+          null,
+          `🔍 Found ${total} proxies. Checking them now...\n⏳ Progress: ${progress}% (${processedCount}/${total} proxies checked)`
+        );
+        lastUpdate = progress;
+      } catch (e) {
+        console.error('Error updating progress message:', e);
+      }
     }
     
     // Check if we need to pause after every 180 proxies
     if (processedCount % DELAY_THRESHOLD === 0 && processedCount < total) {
-      await ctx.reply(`⏸ Pausing for 10 seconds after checking ${processedCount} proxies...`);
-      await new Promise(resolve => setTimeout(resolve, DELAY_DURATION));
+      try {
+        await ctx.telegram.editMessageText(
+          chatId,
+          progressMessages[chatId],
+          null,
+          `🔍 Found ${total} proxies. Checking them now...\n⏳ Progress: ${progress}% (${processedCount}/${total} proxies checked)\n⏸ Pausing for 10 seconds...`
+        );
+        await new Promise(resolve => setTimeout(resolve, DELAY_DURATION));
+      } catch (e) {
+        console.error('Error updating pause message:', e);
+      }
     } else if (i + BATCH_SIZE < proxies.length) {
       // Regular delay between batches
       await new Promise(resolve => setTimeout(resolve, 500));
