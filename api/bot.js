@@ -1,12 +1,24 @@
 const { Telegraf } = require('telegraf');
-const fs = require('fs');
 const axios = require('axios');
 
-const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN || '7058049478:AAGfCnagRO1vv6zItxtJkkiMbh2rax6kzQ4');
+const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
 const API_URL = process.env.PROXY_CHECK_API || 'https://cekstupid.vercel.app/api/v1';
 
-// Store processing status by chat ID
 const processingStatus = {};
+const rateLimit = {};
+
+// Rate limiting middleware
+bot.use((ctx, next) => {
+  const chatId = ctx.chat?.id;
+  if (!chatId) return next();
+  
+  const now = Date.now();
+  if (rateLimit[chatId] && now - rateLimit[chatId] < 30000) {
+    return ctx.reply('⚠️ Please wait 30 seconds between requests');
+  }
+  rateLimit[chatId] = now;
+  return next();
+});
 
 bot.start((ctx) => {
   ctx.reply('🤖 Welcome to Proxy Scanner Bot!\n\nSend me a text file containing proxies (max 500) in format:\n- proxy:port\n- proxy,port,countrycode,isp\n\nI will check them and send back active and dead lists.');
@@ -14,7 +26,15 @@ bot.start((ctx) => {
 
 bot.on('document', async (ctx) => {
   const chatId = ctx.message.chat.id;
-  
+  const document = ctx.message.document;
+
+  // Validate file
+  if (!document.mime_type.includes('text/plain') && !document.file_name.endsWith('.txt')) {
+    return ctx.reply('❌ Please send a plain text file (.txt)');
+  }
+  if (document.file_size > 100 * 1024) {
+    return ctx.reply('❌ File too large. Maximum size is 100KB');
+  }
   if (processingStatus[chatId]) {
     return ctx.reply('Please wait, your previous request is still processing.');
   }
@@ -22,46 +42,23 @@ bot.on('document', async (ctx) => {
   processingStatus[chatId] = true;
   
   try {
-    const file = await ctx.telegram.getFile(ctx.message.document.file_id);
+    const file = await ctx.telegram.getFile(document.file_id);
     const fileUrl = `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${file.file_path}`;
-    
-    // Download the file
     const response = await axios.get(fileUrl, { responseType: 'text' });
-    const content = response.data;
-    
-    // Parse proxies
-    const proxies = parseProxies(content);
+    const proxies = parseProxies(response.data);
     
     if (proxies.length === 0) {
-      processingStatus[chatId] = false;
       return ctx.reply('No valid proxies found in the file. Please check the format.');
     }
-    
     if (proxies.length > 500) {
-      processingStatus[chatId] = false;
       return ctx.reply(`Too many proxies (${proxies.length}). Maximum allowed is 500.`);
     }
     
-    ctx.reply(`🔍 Found ${proxies.length} proxies. Checking them now...`);
+    await ctx.reply(`🔍 Found ${proxies.length} proxies. Checking them now...`);
+    const results = await checkProxies(ctx, proxies);
     
-    // Check proxies
-    const results = await checkProxies(proxies);
-    
-    // Create files
-    const activeContent = results.active.map(p => `${p.ip},${p.port},${p.countryCode || ''},${p.isp || ''}`).join('\n');
-    const deadContent = results.dead.map(p => `${p.ip},${p.port}`).join('\n');
-    
-    // Send files
-    await ctx.replyWithDocument({
-      source: Buffer.from(activeContent),
-      filename: 'active.txt'
-    });
-    
-    await ctx.replyWithDocument({
-      source: Buffer.from(deadContent),
-      filename: 'dead.txt'
-    });
-    
+    // Send results
+    await sendResults(ctx, results);
     await ctx.reply(`✅ Done!\nActive: ${results.active.length}\nDead: ${results.dead.length}`);
     
   } catch (error) {
@@ -72,70 +69,98 @@ bot.on('document', async (ctx) => {
   }
 });
 
+// Helper functions
 function parseProxies(content) {
-  const lines = content.split('\n').filter(line => line.trim());
-  const proxies = [];
-  
-  for (const line of lines) {
-    try {
-      if (line.includes(',')) {
-        // Format: proxy,port,countrycode,isp
-        const [ip, port, countryCode, isp] = line.split(',');
-        if (ip && port) {
-          proxies.push({ ip: ip.trim(), port: parseInt(port.trim()), countryCode, isp });
+  return content.split('\n')
+    .filter(line => line.trim())
+    .map(line => {
+      try {
+        if (line.includes(',')) {
+          const [ip, port, countryCode, isp] = line.split(',');
+          return ip && port ? { ip: ip.trim(), port: parseInt(port.trim()), countryCode, isp } : null;
+        } else if (line.includes(':')) {
+          const [ip, port] = line.split(':');
+          return ip && port ? { ip: ip.trim(), port: parseInt(port.trim()) } : null;
         }
-      } else if (line.includes(':')) {
-        // Format: proxy:port
-        const [ip, port] = line.split(':');
-        if (ip && port) {
-          proxies.push({ ip: ip.trim(), port: parseInt(port.trim()) });
-        }
+      } catch (e) {
+        return null;
       }
-    } catch (e) {
-      console.log(`Skipping invalid line: ${line}`);
-    }
-  }
-  
-  return proxies;
+    })
+    .filter(Boolean);
 }
 
-async function checkProxies(proxies) {
+async function checkProxies(ctx, proxies) {
   const active = [];
   const dead = [];
-  
-  for (const proxy of proxies) {
-    try {
-      const response = await axios.get(`${API_URL}?ip=${proxy.ip}&port=${proxy.port}`);
-      
-      if (response.data.proxyip) {
-        active.push({
-          ip: proxy.ip,
-          port: proxy.port,
-          countryCode: response.data.countryCode || '',
-          isp: response.data.asOrganization || ''
+  const total = proxies.length;
+  let lastUpdate = 0;
+
+  for (let i = 0; i < proxies.length; i += 10) {
+    const batch = proxies.slice(i, i + 10);
+    await Promise.all(batch.map(async (proxy) => {
+      try {
+        const response = await axios.get(`${API_URL}?ip=${proxy.ip}&port=${proxy.port}`, {
+          timeout: 5000
         });
-      } else {
-        dead.push({
-          ip: proxy.ip,
-          port: proxy.port
-        });
+        
+        if (response.data.proxyip) {
+          active.push({
+            ip: proxy.ip,
+            port: proxy.port,
+            countryCode: response.data.countryCode || '',
+            isp: response.data.asOrganization || ''
+          });
+        } else {
+          dead.push(proxy);
+        }
+      } catch (error) {
+        dead.push(proxy);
       }
-    } catch (error) {
-      dead.push({
-        ip: proxy.ip,
-        port: proxy.port
-      });
+    }));
+
+    // Send progress update
+    const progress = Math.floor(((i + 10) / total) * 100);
+    const now = Date.now();
+    if (progress >= lastUpdate + 25 || now - lastUpdate > 60000) {
+      await ctx.reply(`⏳ Progress: ${progress}% (${i + 10}/${total} proxies checked)`);
+      lastUpdate = progress;
     }
     
-    // Small delay between checks
-    await new Promise(resolve => setTimeout(resolve, 500));
+    if (i + 10 < proxies.length) {
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
   }
   
   return { active, dead };
 }
 
-// Start bot
+async function sendResults(ctx, results) {
+  const activeContent = results.active.map(p => 
+    `${p.ip},${p.port},${p.countryCode || ''},${p.isp || ''}`
+  ).join('\n');
+  
+  const deadContent = results.dead.map(p => 
+    `${p.ip},${p.port}`
+  ).join('\n');
+
+  await Promise.all([
+    ctx.replyWithDocument({
+      source: Buffer.from(activeContent),
+      filename: 'active.txt'
+    }),
+    ctx.replyWithDocument({
+      source: Buffer.from(deadContent),
+      filename: 'dead.txt'
+    })
+  ]);
+}
+
+// Webhook handler
 module.exports = async (req, res) => {
+  if (req.method === 'GET') {
+    return res.status(200).send('Ready to accept updates');
+  }
+  
   if (req.method === 'POST') {
     try {
       await bot.handleUpdate(req.body);
@@ -145,6 +170,13 @@ module.exports = async (req, res) => {
       res.status(500).send('Error');
     }
   } else {
-    res.status(200).send('Proxy Scanner Bot is running');
+    res.status(405).send('Method not allowed');
   }
 };
+
+// Local development
+if (process.env.NODE_ENV === 'development') {
+  bot.launch();
+  process.once('SIGINT', () => bot.stop('SIGINT'));
+  process.once('SIGTERM', () => bot.stop('SIGTERM'));
+}
