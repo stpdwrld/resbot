@@ -107,68 +107,85 @@ async function checkProxies(ctx, chatId, proxies) {
   const active = [];
   const dead = [];
   const total = proxies.length;
-  let lastUpdate = 0;
+  let lastProgress = 0;
   let processedCount = 0;
   const BATCH_SIZE = 10;
-  const DELAY_THRESHOLD = 180; // Delay after every 180 proxies
-  const DELAY_DURATION = 10000; // 10 seconds delay
+  const DELAY_THRESHOLD = 180;
+  const DELAY_DURATION = 10000;
+  let lastUpdateTime = Date.now();
 
   for (let i = 0; i < proxies.length; i += BATCH_SIZE) {
     const batch = proxies.slice(i, i + BATCH_SIZE);
     
     // Process current batch
-    await Promise.all(batch.map(async (proxy) => {
+    const batchResults = await Promise.all(batch.map(async (proxy) => {
       try {
         const response = await axios.get(`${API_URL}?ip=${proxy.ip}&port=${proxy.port}`, {
           timeout: 5000
         });
         
-        if (response.data.proxyip) {
-          active.push({
-            ip: proxy.ip,
-            port: proxy.port,
-            countryCode: response.data.countryCode || '',
-            isp: response.data.asOrganization || ''
-          });
-        } else {
-          dead.push(proxy);
-        }
+        return {
+          success: true,
+          data: response.data,
+          proxy
+        };
       } catch (error) {
-        dead.push(proxy);
+        return {
+          success: false,
+          proxy
+        };
       }
     }));
 
+    // Process results
+    batchResults.forEach(result => {
+      if (result.success && result.data.proxyip) {
+        active.push({
+          ip: result.proxy.ip,
+          port: result.proxy.port,
+          countryCode: result.data.countryCode || '',
+          isp: result.data.asOrganization || ''
+        });
+      } else {
+        dead.push(result.proxy);
+      }
+    });
+
     processedCount += batch.length;
-    
-    // Update progress message
-    const progress = Math.floor((processedCount / total) * 100);
+    const currentProgress = Math.floor((processedCount / total) * 100);
     const now = Date.now();
-    if (progress >= lastUpdate + 5 || now - lastUpdate > 30000) { // Update every 5% or 30 seconds
+
+    // Update progress if:
+    // - Progress increased by at least 5%
+    // - Or 30 seconds have passed since last update
+    // - Or we're starting a pause
+    if (currentProgress >= lastProgress + 5 || 
+        now - lastUpdateTime > 30000 || 
+        (processedCount % DELAY_THRESHOLD === 0 && processedCount < total)) {
+      
+      let message = `🔍 Found ${total} proxies. Checking them now...\n⏳ Progress: ${currentProgress}% (${processedCount}/${total} proxies checked)`;
+      
+      // Add pause notice if needed
+      if (processedCount % DELAY_THRESHOLD === 0 && processedCount < total) {
+        message += `\n⏸ Pausing for ${DELAY_DURATION/1000} seconds...`;
+      }
+
       try {
         await ctx.telegram.editMessageText(
           chatId,
           progressMessages[chatId],
           null,
-          `🔍 Found ${total} proxies. Checking them now...\n⏳ Progress: ${progress}% (${processedCount}/${total} proxies checked)`
+          message
         );
-        lastUpdate = progress;
+        lastProgress = currentProgress;
+        lastUpdateTime = now;
       } catch (e) {
         console.error('Error updating progress message:', e);
       }
-    }
-    
-    // Check if we need to pause after every 180 proxies
-    if (processedCount % DELAY_THRESHOLD === 0 && processedCount < total) {
-      try {
-        await ctx.telegram.editMessageText(
-          chatId,
-          progressMessages[chatId],
-          null,
-          `🔍 Found ${total} proxies. Checking them now...\n⏳ Progress: ${progress}% (${processedCount}/${total} proxies checked)\n⏸ Pausing for 10 seconds...`
-        );
+
+      // Handle pause if needed
+      if (processedCount % DELAY_THRESHOLD === 0 && processedCount < total) {
         await new Promise(resolve => setTimeout(resolve, DELAY_DURATION));
-      } catch (e) {
-        console.error('Error updating pause message:', e);
       }
     } else if (i + BATCH_SIZE < proxies.length) {
       // Regular delay between batches
