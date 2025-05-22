@@ -5,20 +5,6 @@ const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
 const API_URL = process.env.PROXY_CHECK_API || 'https://cekstupid.vercel.app/api/v1';
 
 const processingStatus = {};
-const rateLimit = {};
-
-// Rate limiting middleware
-bot.use((ctx, next) => {
-  const chatId = ctx.chat?.id;
-  if (!chatId) return next();
-  
-  const now = Date.now();
-  if (rateLimit[chatId] && now - rateLimit[chatId] < 30000) {
-    return ctx.reply('⚠️ Please wait 30 seconds between requests');
-  }
-  rateLimit[chatId] = now;
-  return next();
-});
 
 bot.start((ctx) => {
   ctx.reply('🤖 Welcome to Proxy Scanner Bot!\n\nSend me a text file containing proxies (max 500) in format:\n- proxy:port\n- proxy,port,countrycode,isp\n\nI will check them and send back active and dead lists.');
