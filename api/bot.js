@@ -95,9 +95,14 @@ async function checkProxies(ctx, proxies) {
   const total = proxies.length;
   let lastUpdate = 0;
   let processedCount = 0;
+  const BATCH_SIZE = 10;
+  const DELAY_THRESHOLD = 180; // Delay after every 180 proxies
+  const DELAY_DURATION = 10000; // 10 seconds delay
 
-  for (let i = 0; i < proxies.length; i += 10) {
-    const batch = proxies.slice(i, i + 10);
+  for (let i = 0; i < proxies.length; i += BATCH_SIZE) {
+    const batch = proxies.slice(i, i + BATCH_SIZE);
+    
+    // Process current batch
     await Promise.all(batch.map(async (proxy) => {
       try {
         const response = await axios.get(`${API_URL}?ip=${proxy.ip}&port=${proxy.port}`, {
@@ -129,11 +134,12 @@ async function checkProxies(ctx, proxies) {
       lastUpdate = progress;
     }
     
-    // Add 10-second delay after every 180 proxies
-    if (processedCount % 180 === 0 && processedCount < total) {
+    // Check if we need to pause after every 180 proxies
+    if (processedCount % DELAY_THRESHOLD === 0 && processedCount < total) {
       await ctx.reply(`⏸ Pausing for 10 seconds after checking ${processedCount} proxies...`);
-      await new Promise(resolve => setTimeout(resolve, 10000));
-    } else if (i + 10 < proxies.length) {
+      await new Promise(resolve => setTimeout(resolve, DELAY_DURATION));
+    } else if (i + BATCH_SIZE < proxies.length) {
+      // Regular delay between batches
       await new Promise(resolve => setTimeout(resolve, 500));
     }
   }
