@@ -2,7 +2,7 @@ const { Telegraf } = require('telegraf');
 const fs = require('fs');
 const axios = require('axios');
 
-const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN || '7710700307:AAFi4nCRsVMK8Km9JAbMrx5d2bJr_rD-TN4');
+const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN || '7058049478:AAGfCnagRO1vv6zItxtJkkiMbh2rax6kzQ4');
 const API_URL = process.env.PROXY_CHECK_API || 'https://cekstupid.vercel.app/api/v1';
 
 // Store processing status by chat ID
