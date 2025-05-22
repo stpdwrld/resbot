@@ -1,11 +1,15 @@
 const { Telegraf } = require('telegraf');
 const axios = require('axios');
+const fs = require('fs');
+const path = require('path');
 
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
 const API_URL = process.env.PROXY_CHECK_API || 'https://cekstupid.vercel.app/api/v1';
 
 const processingStatus = {};
 const rateLimit = {};
+
+const progressData = {};  // Store the progress
 
 // Rate limiting middleware
 bot.use((ctx, next) => {
@@ -55,7 +59,7 @@ bot.on('document', async (ctx) => {
     }
     
     await ctx.reply(`🔍 Found ${proxies.length} proxies. Checking them now...`);
-    const results = await checkProxies(ctx, proxies);
+    const results = await checkProxies(ctx, proxies, chatId);
     
     // Send results
     await sendResults(ctx, results);
@@ -89,11 +93,14 @@ function parseProxies(content) {
     .filter(Boolean);
 }
 
-async function checkProxies(ctx, proxies) {
+async function checkProxies(ctx, proxies, chatId) {
   const active = [];
   const dead = [];
   const total = proxies.length;
   let lastUpdate = 0;
+
+  // Store the progress in the `progressData`
+  progressData[chatId] = { checked: 0, total: total };
 
   for (let i = 0; i < proxies.length; i += 10) {
     const batch = proxies.slice(i, i + 10);
@@ -118,19 +125,21 @@ async function checkProxies(ctx, proxies) {
       }
     }));
 
-    // Send progress update
-    const progress = Math.floor(((i + 10) / total) * 100);
+    // Update progress and avoid flooding with too many updates
+    progressData[chatId].checked = i + 10;
+
+    // Only send progress every 25% or 1 minute
+    const progress = Math.floor((progressData[chatId].checked / total) * 100);
     const now = Date.now();
     if (progress >= lastUpdate + 25 || now - lastUpdate > 60000) {
-      await ctx.reply(`⏳ Progress: ${progress}% (${i + 10}/${total} proxies checked)`);
       lastUpdate = progress;
     }
-    
+
     if (i + 10 < proxies.length) {
-      await new Promise(resolve => setTimeout(resolve, 500));
+      await new Promise(resolve => setTimeout(resolve, 500));  // Slight delay
     }
   }
-  
+
   return { active, dead };
 }
 
@@ -143,16 +152,22 @@ async function sendResults(ctx, results) {
     `${p.ip},${p.port}`
   ).join('\n');
 
+  // Save the result files locally
+  const activeFile = path.join(__dirname, 'active.txt');
+  const deadFile = path.join(__dirname, 'dead.txt');
+
+  fs.writeFileSync(activeFile, activeContent);
+  fs.writeFileSync(deadFile, deadContent);
+
+  // Send the result files as a reply
   await Promise.all([
-    ctx.replyWithDocument({
-      source: Buffer.from(activeContent),
-      filename: 'active.txt'
-    }),
-    ctx.replyWithDocument({
-      source: Buffer.from(deadContent),
-      filename: 'dead.txt'
-    })
+    ctx.replyWithDocument({ source: fs.createReadStream(activeFile), filename: 'active.txt' }),
+    ctx.replyWithDocument({ source: fs.createReadStream(deadFile), filename: 'dead.txt' })
   ]);
+
+  // Cleanup the files
+  fs.unlinkSync(activeFile);
+  fs.unlinkSync(deadFile);
 }
 
 // Webhook handler
