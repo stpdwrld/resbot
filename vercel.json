@@ -8,7 +8,7 @@
     {
       "src": "api/check-proxy.js",
       "use": "@vercel/node"
-    },
+    }
   ],
   "routes": [
     {
@@ -18,6 +18,6 @@
     {
       "src": "/api/v1",
       "dest": "/api/check-proxy.js"
-    },
+    }
   ]
 }
